@@ -1,5 +1,5 @@
 name: hugo
-version: "0.18-DEV"
+version: "0.34-DEV"
 summary: Fast and Flexible Static Site Generator
 description: |
   Hugo is a static HTML and CSS website generator written in Go. It is
@@ -17,6 +17,23 @@ parts:
   hugo:
     source: .
     plugin: go
-    go-importpath: "github.com/spf13/hugo"
+    go-importpath: github.com/gohugoio/hugo
     build-packages:
       - git
+      - make
+    stage-packages:
+      - git
+      - python-pygments
+    prepare: |
+      export GOPATH=$(dirname $SNAPCRAFT_PART_INSTALL)/go
+      export PATH=$GOPATH/bin:$PATH
+      cd $GOPATH/src/github.com/gohugoio/hugo
+      go get github.com/magefile/mage
+      mage vendor test
+      rm -f $GOPATH/bin/dep
+      rm -f $GOPATH/bin/mage
+    install: |
+      strip --remove-section=.comment --remove-section=.note $SNAPCRAFT_PART_INSTALL/bin/hugo
+    after: [go]
+  go:
+    source-tag: go1.9.2

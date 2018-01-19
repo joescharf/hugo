@@ -16,8 +16,6 @@ package hugolib
 import (
 	"fmt"
 	"sort"
-
-	"github.com/spf13/hugo/helpers"
 )
 
 // The TaxonomyList is a list of all taxonomies and their values
@@ -41,11 +39,11 @@ type WeightedPages []WeightedPage
 // A WeightedPage is a Page with a weight.
 type WeightedPage struct {
 	Weight int
-	Page   *Page
+	*Page
 }
 
 func (w WeightedPage) String() string {
-	return fmt.Sprintf("WeightedPage(%d,%q)", w.Weight, w.Page.Title)
+	return fmt.Sprintf("WeightedPage(%d,%q)", w.Weight, w.Page.title)
 }
 
 // OrderedTaxonomy is another representation of an Taxonomy using an array rather than a map.
@@ -59,26 +57,15 @@ type OrderedTaxonomyEntry struct {
 	WeightedPages WeightedPages
 }
 
-// KeyPrep... Taxonomies should be case insensitive. Can make it easily conditional later.
-func kp(in string) string {
-	return helpers.CurrentPathSpec().MakePathSanitized(in)
-}
-
 // Get the weighted pages for the given key.
 func (i Taxonomy) Get(key string) WeightedPages {
-	if val, ok := i[key]; ok {
-		return val
-	}
-	return i[kp(key)]
+	return i[key]
 }
 
 // Count the weighted pages for the given key.
-func (i Taxonomy) Count(key string) int { return len(i[kp(key)]) }
+func (i Taxonomy) Count(key string) int { return len(i[key]) }
 
-func (i Taxonomy) add(key string, w WeightedPage, pretty bool) {
-	if !pretty {
-		key = kp(key)
-	}
+func (i Taxonomy) add(key string, w WeightedPage) {
 	i[key] = append(i[key], w)
 }
 
@@ -227,7 +214,7 @@ func (wp WeightedPages) Count() int { return len(wp) }
 func (wp WeightedPages) Less(i, j int) bool {
 	if wp[i].Weight == wp[j].Weight {
 		if wp[i].Page.Date.Equal(wp[j].Page.Date) {
-			return wp[i].Page.Title < wp[j].Page.Title
+			return wp[i].Page.title < wp[j].Page.title
 		}
 		return wp[i].Page.Date.After(wp[i].Page.Date)
 	}

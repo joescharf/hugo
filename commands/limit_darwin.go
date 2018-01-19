@@ -11,7 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build darwin
 // Copyright 2015 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -76,11 +75,11 @@ func tweakLimit() {
 		jww.ERROR.Println("Unable to obtain rLimit", err)
 	}
 	if rLimit.Cur < rLimit.Max {
-		rLimit.Max = 999999
-		rLimit.Cur = 999999
+		rLimit.Max = 64000
+		rLimit.Cur = 64000
 		err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
 		if err != nil {
-			jww.ERROR.Println("Unable to increase number of open files limit", err)
+			jww.WARN.Println("Unable to increase number of open files limit", err)
 		}
 	}
 }

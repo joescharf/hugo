@@ -13,3 +13,6 @@ cover.out
 vendor/*/
 *.bench
 coverage*.out
+
+GoBuilds
+dist

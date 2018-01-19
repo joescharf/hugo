@@ -14,18 +14,18 @@
 package commands
 
 import (
-	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
+	src "github.com/gohugoio/hugo/source"
+
+	"github.com/gohugoio/hugo/hugolib"
+
+	"path/filepath"
+
+	"github.com/gohugoio/hugo/parser"
 	"github.com/spf13/cast"
 	"github.com/spf13/cobra"
-	"github.com/spf13/hugo/helpers"
-	"github.com/spf13/hugo/hugolib"
-	"github.com/spf13/hugo/parser"
-	jww "github.com/spf13/jwalterweatherman"
-	"github.com/spf13/viper"
 )
 
 var outputDir string
@@ -80,82 +80,104 @@ func init() {
 	convertCmd.PersistentFlags().SetAnnotation("source", cobra.BashCompSubdirsInDir, []string{})
 }
 
-func convertContents(mark rune) (err error) {
-	if err := InitializeConfig(); err != nil {
+func convertContents(mark rune) error {
+	if outputDir == "" && !unsafe {
+		return newUserError("Unsafe operation not allowed, use --unsafe or set a different output path")
+	}
+
+	c, err := InitializeConfig(false, nil)
+	if err != nil {
 		return err
 	}
 
-	h, err := hugolib.NewHugoSitesFromConfiguration()
-
+	h, err := hugolib.NewHugoSites(*c.DepsCfg)
 	if err != nil {
+		return err
+	}
+
+	if err := h.Build(hugolib.BuildCfg{SkipRender: true}); err != nil {
 		return err
 	}
 
 	site := h.Sites[0]
 
-	if err = site.Initialise(); err != nil {
+	site.Log.FEEDBACK.Println("processing", len(site.AllPages), "content files")
+	for _, p := range site.AllPages {
+		if err := convertAndSavePage(p, site, mark); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func convertAndSavePage(p *hugolib.Page, site *hugolib.Site, mark rune) error {
+	// The resources are not in .Site.AllPages.
+	for _, r := range p.Resources.ByType("page") {
+		if err := convertAndSavePage(r.(*hugolib.Page), site, mark); err != nil {
+			return err
+		}
+	}
+
+	if p.Filename() == "" {
+		// No content file.
+		return nil
+	}
+
+	site.Log.INFO.Println("Attempting to convert", p.LogicalName())
+	newPage, err := site.NewPage(p.LogicalName())
+	if err != nil {
 		return err
 	}
 
-	if site.Source == nil {
-		panic("site.Source not set")
+	f, _ := p.File.(src.ReadableFile)
+	file, err := f.Open()
+	if err != nil {
+		site.Log.ERROR.Println("Error reading file:", p.Path())
+		file.Close()
+		return nil
 	}
-	if len(site.Source.Files()) < 1 {
-		return errors.New("No source files found")
+
+	psr, err := parser.ReadFrom(file)
+	if err != nil {
+		site.Log.ERROR.Println("Error processing file:", p.Path())
+		file.Close()
+		return err
 	}
 
-	contentDir := helpers.AbsPathify(viper.GetString("contentDir"))
-	jww.FEEDBACK.Println("processing", len(site.Source.Files()), "content files")
-	for _, file := range site.Source.Files() {
-		jww.INFO.Println("Attempting to convert", file.LogicalName())
-		page, err := hugolib.NewPage(file.LogicalName())
-		if err != nil {
-			return err
-		}
+	file.Close()
 
-		psr, err := parser.ReadFrom(file.Contents)
-		if err != nil {
-			jww.ERROR.Println("Error processing file:", file.Path())
-			return err
-		}
-		metadata, err := psr.Metadata()
-		if err != nil {
-			jww.ERROR.Println("Error processing file:", file.Path())
-			return err
-		}
+	metadata, err := psr.Metadata()
+	if err != nil {
+		site.Log.ERROR.Println("Error processing file:", p.Path())
+		return err
+	}
 
-		// better handling of dates in formats that don't have support for them
-		if mark == parser.FormatToLeadRune("json") || mark == parser.FormatToLeadRune("yaml") || mark == parser.FormatToLeadRune("toml") {
-			newmetadata := cast.ToStringMap(metadata)
-			for k, v := range newmetadata {
-				switch vv := v.(type) {
-				case time.Time:
-					newmetadata[k] = vv.Format(time.RFC3339)
-				}
-			}
-			metadata = newmetadata
-		}
-
-		page.SetDir(filepath.Join(contentDir, file.Dir()))
-		page.SetSourceContent(psr.Content())
-		if err = page.SetSourceMetaData(metadata, mark); err != nil {
-			jww.ERROR.Printf("Failed to set source metadata for file %q: %s. For more info see For more info see https://github.com/spf13/hugo/issues/2458", page.FullFilePath(), err)
-			continue
-		}
-
-		if outputDir != "" {
-			if err = page.SaveSourceAs(filepath.Join(outputDir, page.FullFilePath())); err != nil {
-				return fmt.Errorf("Failed to save file %q: %s", page.FullFilePath(), err)
-			}
-		} else {
-			if unsafe {
-				if err = page.SaveSource(); err != nil {
-					return fmt.Errorf("Failed to save file %q: %s", page.FullFilePath(), err)
-				}
-			} else {
-				jww.FEEDBACK.Println("Unsafe operation not allowed, use --unsafe or set a different output path")
+	// better handling of dates in formats that don't have support for them
+	if mark == parser.FormatToLeadRune("json") || mark == parser.FormatToLeadRune("yaml") || mark == parser.FormatToLeadRune("toml") {
+		newMetadata := cast.ToStringMap(metadata)
+		for k, v := range newMetadata {
+			switch vv := v.(type) {
+			case time.Time:
+				newMetadata[k] = vv.Format(time.RFC3339)
 			}
 		}
+		metadata = newMetadata
 	}
-	return
+
+	newPage.SetSourceContent(psr.Content())
+	if err = newPage.SetSourceMetaData(metadata, mark); err != nil {
+		site.Log.ERROR.Printf("Failed to set source metadata for file %q: %s. For more info see For more info see https://github.com/gohugoio/hugo/issues/2458", newPage.FullFilePath(), err)
+		return nil
+	}
+
+	newFilename := p.Filename()
+	if outputDir != "" {
+		newFilename = filepath.Join(outputDir, p.Dir(), newPage.LogicalName())
+	}
+
+	if err = newPage.SaveSourceAs(newFilename); err != nil {
+		return fmt.Errorf("Failed to save file %q: %s", newFilename, err)
+	}
+
+	return nil
 }

@@ -13,13 +13,20 @@
 
 package hugolib
 
+import (
+	"path"
+	"path/filepath"
+
+	"github.com/gohugoio/hugo/cache"
+)
+
 // PageCollections contains the page collections for a site.
 type PageCollections struct {
 	// Includes only pages of all types, and only pages in the current language.
 	Pages Pages
 
 	// Includes all pages in all languages, including the current one.
-	// Inlcudes pages of all types.
+	// Includes pages of all types.
 	AllPages Pages
 
 	// A convenience cache for the traditional index types, taxonomies, home page etc.
@@ -35,12 +42,60 @@ type PageCollections struct {
 
 	// Includes absolute all pages (of all types), including drafts etc.
 	rawAllPages Pages
+
+	pageCache *cache.PartitionedLazyCache
 }
 
 func (c *PageCollections) refreshPageCaches() {
 	c.indexPages = c.findPagesByKindNotIn(KindPage, c.Pages)
 	c.RegularPages = c.findPagesByKindIn(KindPage, c.Pages)
 	c.AllRegularPages = c.findPagesByKindIn(KindPage, c.AllPages)
+
+	var s *Site
+
+	if len(c.Pages) > 0 {
+		s = c.Pages[0].s
+	}
+
+	cacheLoader := func(kind string) func() (map[string]interface{}, error) {
+		return func() (map[string]interface{}, error) {
+			cache := make(map[string]interface{})
+			switch kind {
+			case KindPage:
+				// Note that we deliberately use the pages from all sites
+				// in this cache, as we intend to use this in the ref and relref
+				// shortcodes. If the user says "sect/doc1.en.md", he/she knows
+				// what he/she is looking for.
+				for _, p := range c.AllRegularPages {
+					cache[filepath.ToSlash(p.Source.Path())] = p
+					// Ref/Relref supports this potentially ambiguous lookup.
+					cache[p.Source.LogicalName()] = p
+
+					if s != nil && p.s == s {
+						// We need a way to get to the current language version.
+						pathWithNoExtensions := path.Join(filepath.ToSlash(p.Source.Dir()), p.Source.TranslationBaseName())
+						cache[pathWithNoExtensions] = p
+					}
+
+				}
+			default:
+				for _, p := range c.indexPages {
+					key := path.Join(p.sections...)
+					cache[key] = p
+				}
+			}
+
+			return cache, nil
+		}
+	}
+
+	partitions := make([]cache.Partition, len(allKindsInPages))
+
+	for i, kind := range allKindsInPages {
+		partitions[i] = cache.Partition{Key: kind, Load: cacheLoader(kind)}
+	}
+
+	c.pageCache = cache.NewPartitionedLazyCache(partitions...)
 }
 
 func newPageCollections() *PageCollections {
@@ -51,33 +106,20 @@ func newPageCollectionsFromPages(pages Pages) *PageCollections {
 	return &PageCollections{rawAllPages: pages}
 }
 
-func (c *PageCollections) getPage(typ string, path ...string) *Page {
-	pages := c.findPagesByKindIn(typ, c.Pages)
+func (c *PageCollections) getPage(typ string, sections ...string) *Page {
+	var key string
+	if len(sections) == 1 {
+		key = filepath.ToSlash(sections[0])
+	} else {
+		key = path.Join(sections...)
+	}
 
-	if len(pages) == 0 {
+	p, _ := c.pageCache.Get(typ, key)
+	if p == nil {
 		return nil
 	}
+	return p.(*Page)
 
-	if len(path) == 0 && len(pages) == 1 {
-		return pages[0]
-	}
-
-	for _, p := range pages {
-		match := false
-		for i := 0; i < len(path); i++ {
-			if len(p.sections) > i && path[i] == p.sections[i] {
-				match = true
-			} else {
-				match = false
-				break
-			}
-		}
-		if match {
-			return p
-		}
-	}
-
-	return nil
 }
 
 func (*PageCollections) findPagesByKindIn(kind string, inPages Pages) Pages {
@@ -108,20 +150,58 @@ func (c *PageCollections) addPage(page *Page) {
 	c.rawAllPages = append(c.rawAllPages, page)
 }
 
-func (c *PageCollections) removePageByPath(path string) {
-	if i := c.rawAllPages.FindPagePosByFilePath(path); i >= 0 {
+// When we get a REMOVE event we're not always getting all the individual files,
+// so we need to remove all below a given path.
+func (c *PageCollections) removePageByPathPrefix(path string) {
+	for {
+		i := c.rawAllPages.findFirstPagePosByFilePathPrefix(path)
+		if i == -1 {
+			break
+		}
 		c.rawAllPages = append(c.rawAllPages[:i], c.rawAllPages[i+1:]...)
 	}
 }
 
-func (c *PageCollections) removePage(page *Page) {
-	if i := c.rawAllPages.FindPagePos(page); i >= 0 {
+func (c *PageCollections) removePageByPath(path string) {
+	if i := c.rawAllPages.findPagePosByFilePath(path); i >= 0 {
+		c.clearResourceCacheForPage(c.rawAllPages[i])
 		c.rawAllPages = append(c.rawAllPages[:i], c.rawAllPages[i+1:]...)
 	}
+
+}
+
+func (c *PageCollections) removePage(page *Page) {
+	if i := c.rawAllPages.findPagePos(page); i >= 0 {
+		c.clearResourceCacheForPage(c.rawAllPages[i])
+		c.rawAllPages = append(c.rawAllPages[:i], c.rawAllPages[i+1:]...)
+	}
+
+}
+
+func (c *PageCollections) findPagesByShortcode(shortcode string) Pages {
+	var pages Pages
+
+	for _, p := range c.rawAllPages {
+		if p.shortcodeState != nil {
+			if _, ok := p.shortcodeState.nameSet[shortcode]; ok {
+				pages = append(pages, p)
+			}
+		}
+	}
+	return pages
 }
 
 func (c *PageCollections) replacePage(page *Page) {
 	// will find existing page that matches filepath and remove it
 	c.removePage(page)
 	c.addPage(page)
+}
+
+func (c *PageCollections) clearResourceCacheForPage(page *Page) {
+	if len(page.Resources) > 0 {
+		first := page.Resources[0]
+		dir := path.Dir(first.RelPermalink())
+		// This is done to keep the memory usage in check when doing live reloads.
+		page.s.resourceSpec.DeleteCacheByPrefix(dir)
+	}
 }

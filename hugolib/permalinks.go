@@ -16,9 +16,13 @@ package hugolib
 import (
 	"errors"
 	"fmt"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/gohugoio/hugo/helpers"
 )
 
 // pathPattern represents a string which builds up a URL from attributes
@@ -150,14 +154,19 @@ func pageToPermalinkDate(p *Page, dateField string) (string, error) {
 func pageToPermalinkTitle(p *Page, _ string) (string, error) {
 	// Page contains Node which has Title
 	// (also contains URLPath which has Slug, sometimes)
-	return p.Site.pathSpec.URLize(p.Title), nil
+	return p.s.PathSpec.URLize(p.title), nil
 }
 
 // pageToPermalinkFilename returns the URL-safe form of the filename
 func pageToPermalinkFilename(p *Page, _ string) (string, error) {
-	//var extension = p.Source.Ext
-	//var name = p.Source.Path()[0 : len(p.Source.Path())-len(extension)]
-	return p.Site.pathSpec.URLize(p.Source.TranslationBaseName()), nil
+	name := p.File.TranslationBaseName()
+	if name == "index" {
+		// Page bundles; the directory name will hopefully have a better name.
+		dir := strings.TrimSuffix(p.File.Dir(), helpers.FilePathSeparator)
+		_, name = filepath.Split(dir)
+	}
+
+	return p.s.PathSpec.URLize(name), nil
 }
 
 // if the page has a slug, return the slug, else return the title
@@ -172,7 +181,7 @@ func pageToPermalinkSlugElseTitle(p *Page, a string) (string, error) {
 		if strings.HasSuffix(p.Slug, "-") {
 			p.Slug = p.Slug[0 : len(p.Slug)-1]
 		}
-		return p.Site.pathSpec.URLize(p.Slug), nil
+		return p.s.PathSpec.URLize(p.Slug), nil
 	}
 	return pageToPermalinkTitle(p, a)
 }
@@ -180,6 +189,12 @@ func pageToPermalinkSlugElseTitle(p *Page, a string) (string, error) {
 func pageToPermalinkSection(p *Page, _ string) (string, error) {
 	// Page contains Node contains URLPath which has Section
 	return p.Section(), nil
+}
+
+func pageToPermalinkSections(p *Page, _ string) (string, error) {
+	// TODO(bep) we have some superflous URLize in this file, but let's
+	// deal with that later.
+	return path.Join(p.CurrentSection().sections...), nil
 }
 
 func init() {
@@ -192,6 +207,7 @@ func init() {
 		"weekdayname": pageToPermalinkDate,
 		"yearday":     pageToPermalinkDate,
 		"section":     pageToPermalinkSection,
+		"sections":    pageToPermalinkSections,
 		"title":       pageToPermalinkTitle,
 		"slug":        pageToPermalinkSlugElseTitle,
 		"filename":    pageToPermalinkFilename,

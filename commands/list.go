@@ -16,10 +16,9 @@ package commands
 import (
 	"path/filepath"
 
+	"github.com/gohugoio/hugo/hugolib"
 	"github.com/spf13/cobra"
-	"github.com/spf13/hugo/hugolib"
 	jww "github.com/spf13/jwalterweatherman"
-	"github.com/spf13/viper"
 )
 
 func init() {
@@ -44,14 +43,16 @@ var listDraftsCmd = &cobra.Command{
 	Short: "List all drafts",
 	Long:  `List all of the drafts in your content directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-
-		if err := InitializeConfig(); err != nil {
+		cfgInit := func(c *commandeer) error {
+			c.Set("buildDrafts", true)
+			return nil
+		}
+		c, err := InitializeConfig(false, cfgInit)
+		if err != nil {
 			return err
 		}
 
-		viper.Set("buildDrafts", true)
-
-		sites, err := hugolib.NewHugoSitesFromConfiguration()
+		sites, err := hugolib.NewHugoSites(*c.DepsCfg)
 
 		if err != nil {
 			return newSystemError("Error creating sites", err)
@@ -79,14 +80,16 @@ var listFutureCmd = &cobra.Command{
 	Long: `List all of the posts in your content directory which will be
 posted in the future.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-
-		if err := InitializeConfig(); err != nil {
+		cfgInit := func(c *commandeer) error {
+			c.Set("buildFuture", true)
+			return nil
+		}
+		c, err := InitializeConfig(false, cfgInit)
+		if err != nil {
 			return err
 		}
 
-		viper.Set("buildFuture", true)
-
-		sites, err := hugolib.NewHugoSitesFromConfiguration()
+		sites, err := hugolib.NewHugoSites(*c.DepsCfg)
 
 		if err != nil {
 			return newSystemError("Error creating sites", err)
@@ -114,14 +117,16 @@ var listExpiredCmd = &cobra.Command{
 	Long: `List all of the posts in your content directory which has already
 expired.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-
-		if err := InitializeConfig(); err != nil {
+		cfgInit := func(c *commandeer) error {
+			c.Set("buildExpired", true)
+			return nil
+		}
+		c, err := InitializeConfig(false, cfgInit)
+		if err != nil {
 			return err
 		}
 
-		viper.Set("buildExpired", true)
-
-		sites, err := hugolib.NewHugoSitesFromConfiguration()
+		sites, err := hugolib.NewHugoSites(*c.DepsCfg)
 
 		if err != nil {
 			return newSystemError("Error creating sites", err)

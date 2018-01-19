@@ -17,26 +17,32 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/spf13/afero"
+
+	"github.com/jdkato/prose/transform"
+
+	bp "github.com/gohugoio/hugo/bufferpool"
 	"github.com/spf13/cast"
-	bp "github.com/spf13/hugo/bufferpool"
 	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/pflag"
-	"github.com/spf13/viper"
 )
 
 // FilePathSeparator as defined by os.Separator.
 const FilePathSeparator = string(filepath.Separator)
+
+// Strips carriage returns from third-party / external processes (useful for Windows)
+func normalizeExternalHelperLineFeeds(content []byte) []byte {
+	return bytes.Replace(content, []byte("\r"), []byte(""), -1)
+}
 
 // FindAvailablePort returns an available and valid TCP port.
 func FindAvailablePort() (*net.TCPAddr, error) {
@@ -74,8 +80,12 @@ func GuessType(in string) string {
 		return "mmark"
 	case "rst":
 		return "rst"
+	case "pandoc", "pdc":
+		return "pandoc"
 	case "html", "htm":
 		return "html"
+	case "org":
+		return "org"
 	}
 
 	return "unknown"
@@ -190,9 +200,64 @@ func ReaderContains(r io.Reader, subslice []byte) bool {
 	return false
 }
 
+// GetTitleFunc returns a func that can be used to transform a string to
+// title case.
+//
+// The supported styles are
+//
+// - "Go" (strings.Title)
+// - "AP" (see https://www.apstylebook.com/)
+// - "Chicago" (see http://www.chicagomanualofstyle.org/home.html)
+//
+// If an unknown or empty style is provided, AP style is what you get.
+func GetTitleFunc(style string) func(s string) string {
+	switch strings.ToLower(style) {
+	case "go":
+		return strings.Title
+	case "chicago":
+		tc := transform.NewTitleConverter(transform.ChicagoStyle)
+		return tc.Title
+	default:
+		tc := transform.NewTitleConverter(transform.APStyle)
+		return tc.Title
+	}
+}
+
+// HasStringsPrefix tests whether the string slice s begins with prefix slice s.
+func HasStringsPrefix(s, prefix []string) bool {
+	return len(s) >= len(prefix) && compareStringSlices(s[0:len(prefix)], prefix)
+}
+
+// HasStringsSuffix tests whether the string slice s ends with suffix slice s.
+func HasStringsSuffix(s, suffix []string) bool {
+	return len(s) >= len(suffix) && compareStringSlices(s[len(s)-len(suffix):], suffix)
+}
+
+func compareStringSlices(a, b []string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+
+	if a == nil || b == nil {
+		return false
+	}
+
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
 // ThemeSet checks whether a theme is in use or not.
-func ThemeSet() bool {
-	return viper.GetString("theme") != ""
+func (p *PathSpec) ThemeSet() bool {
+	return p.theme != ""
 }
 
 type logPrinter interface {
@@ -244,15 +309,23 @@ func NewDistinctErrorLogger() *DistinctLogger {
 	return &DistinctLogger{m: make(map[string]bool), logger: jww.ERROR}
 }
 
+// NewDistinctWarnLogger creates a new DistinctLogger that logs WARNs
+func NewDistinctWarnLogger() *DistinctLogger {
+	return &DistinctLogger{m: make(map[string]bool), logger: jww.WARN}
+}
+
 // NewDistinctFeedbackLogger creates a new DistinctLogger that can be used
 // to give feedback to the user while not spamming with duplicates.
 func NewDistinctFeedbackLogger() *DistinctLogger {
-	return &DistinctLogger{m: make(map[string]bool), logger: &jww.FEEDBACK}
+	return &DistinctLogger{m: make(map[string]bool), logger: jww.FEEDBACK}
 }
 
 var (
 	// DistinctErrorLog can be used to avoid spamming the logs with errors.
 	DistinctErrorLog = NewDistinctErrorLogger()
+
+	// DistinctWarnLog can be used to avoid spamming the logs with warnings.
+	DistinctWarnLog = NewDistinctWarnLogger()
 
 	// DistinctFeedbackLog can be used to avoid spamming the logs with info messages.
 	DistinctFeedbackLog = NewDistinctFeedbackLogger()
@@ -261,6 +334,8 @@ var (
 // InitLoggers sets up the global distinct loggers.
 func InitLoggers() {
 	DistinctErrorLog = NewDistinctErrorLogger()
+	DistinctWarnLog = NewDistinctWarnLogger()
+	DistinctFeedbackLog = NewDistinctFeedbackLogger()
 }
 
 // Deprecated informs about a deprecation, but only once for a given set of arguments' values.
@@ -270,11 +345,11 @@ func InitLoggers() {
 // plenty of time to fix their templates.
 func Deprecated(object, item, alternative string, err bool) {
 	if err {
-		DistinctErrorLog.Printf("%s's %s is deprecated and will be removed in Hugo %s. Use %s instead.", object, item, NextHugoReleaseVersion(), alternative)
+		DistinctErrorLog.Printf("%s's %s is deprecated and will be removed in Hugo %s. %s.", object, item, CurrentHugoVersion.Next().ReleaseVersion(), alternative)
 
 	} else {
 		// Make sure the users see this while avoiding build breakage. This will not lead to an os.Exit(-1)
-		DistinctFeedbackLog.Printf("WARNING: %s's %s is deprecated and will be removed in a future release. Use %s instead.", object, item, alternative)
+		DistinctFeedbackLog.Printf("WARNING: %s's %s is deprecated and will be removed in a future release. %s.", object, item, alternative)
 	}
 }
 
@@ -292,208 +367,65 @@ func SliceToLower(s []string) []string {
 	return l
 }
 
-// Md5String takes a string and returns its MD5 hash.
-func Md5String(f string) string {
+// MD5String takes a string and returns its MD5 hash.
+func MD5String(f string) string {
 	h := md5.New()
 	h.Write([]byte(f))
 	return hex.EncodeToString(h.Sum([]byte{}))
 }
 
+// MD5FromFileFast creates a MD5 hash from the given file. It only reads parts of
+// the file for speed, so don't use it if the files are very subtly different.
+// It will not close the file.
+func MD5FromFileFast(f afero.File) (string, error) {
+	const (
+		// Do not change once set in stone!
+		maxChunks = 8
+		peekSize  = 64
+		seek      = 2048
+	)
+
+	h := md5.New()
+	buff := make([]byte, peekSize)
+
+	for i := 0; i < maxChunks; i++ {
+		if i > 0 {
+			_, err := f.Seek(seek, 0)
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return "", err
+			}
+		}
+
+		_, err := io.ReadAtLeast(f, buff, peekSize)
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				h.Write(buff)
+				break
+			}
+			return "", err
+		}
+		h.Write(buff)
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// MD5FromFile creates a MD5 hash from the given file.
+// It will not close the file.
+func MD5FromFile(f afero.File) (string, error) {
+	h := md5.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", nil
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // IsWhitespace determines if the given rune is whitespace.
 func IsWhitespace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
-}
-
-// Seq creates a sequence of integers.
-// It's named and used as GNU's seq.
-// Examples:
-// 3 => 1, 2, 3
-// 1 2 4 => 1, 3
-// -3 => -1, -2, -3
-// 1 4 => 1, 2, 3, 4
-// 1 -2 => 1, 0, -1, -2
-func Seq(args ...interface{}) ([]int, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return nil, errors.New("Seq, invalid number of args: 'first' 'increment' (optional) 'last' (optional)")
-	}
-
-	intArgs := cast.ToIntSlice(args)
-
-	if len(intArgs) < 1 || len(intArgs) > 3 {
-		return nil, errors.New("Invalid argument(s) to Seq")
-	}
-
-	var inc = 1
-	var last int
-	var first = intArgs[0]
-
-	if len(intArgs) == 1 {
-		last = first
-		if last == 0 {
-			return []int{}, nil
-		} else if last > 0 {
-			first = 1
-		} else {
-			first = -1
-			inc = -1
-		}
-	} else if len(intArgs) == 2 {
-		last = intArgs[1]
-		if last < first {
-			inc = -1
-		}
-	} else {
-		inc = intArgs[1]
-		last = intArgs[2]
-		if inc == 0 {
-			return nil, errors.New("'increment' must not be 0")
-		}
-		if first < last && inc < 0 {
-			return nil, errors.New("'increment' must be > 0")
-		}
-		if first > last && inc > 0 {
-			return nil, errors.New("'increment' must be < 0")
-		}
-	}
-
-	// sanity check
-	if last < -100000 {
-		return nil, errors.New("size of result exeeds limit")
-	}
-	size := ((last - first) / inc) + 1
-
-	// sanity check
-	if size <= 0 || size > 2000 {
-		return nil, errors.New("size of result exeeds limit")
-	}
-
-	seq := make([]int, size)
-	val := first
-	for i := 0; ; i++ {
-		seq[i] = val
-		val += inc
-		if (inc < 0 && val < last) || (inc > 0 && val > last) {
-			break
-		}
-	}
-
-	return seq, nil
-}
-
-// DoArithmetic performs arithmetic operations (+,-,*,/) using reflection to
-// determine the type of the two terms.
-func DoArithmetic(a, b interface{}, op rune) (interface{}, error) {
-	av := reflect.ValueOf(a)
-	bv := reflect.ValueOf(b)
-	var ai, bi int64
-	var af, bf float64
-	var au, bu uint64
-	switch av.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		ai = av.Int()
-		switch bv.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			bi = bv.Int()
-		case reflect.Float32, reflect.Float64:
-			af = float64(ai) // may overflow
-			ai = 0
-			bf = bv.Float()
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			bu = bv.Uint()
-			if ai >= 0 {
-				au = uint64(ai)
-				ai = 0
-			} else {
-				bi = int64(bu) // may overflow
-				bu = 0
-			}
-		default:
-			return nil, errors.New("Can't apply the operator to the values")
-		}
-	case reflect.Float32, reflect.Float64:
-		af = av.Float()
-		switch bv.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			bf = float64(bv.Int()) // may overflow
-		case reflect.Float32, reflect.Float64:
-			bf = bv.Float()
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			bf = float64(bv.Uint()) // may overflow
-		default:
-			return nil, errors.New("Can't apply the operator to the values")
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		au = av.Uint()
-		switch bv.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			bi = bv.Int()
-			if bi >= 0 {
-				bu = uint64(bi)
-				bi = 0
-			} else {
-				ai = int64(au) // may overflow
-				au = 0
-			}
-		case reflect.Float32, reflect.Float64:
-			af = float64(au) // may overflow
-			au = 0
-			bf = bv.Float()
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			bu = bv.Uint()
-		default:
-			return nil, errors.New("Can't apply the operator to the values")
-		}
-	case reflect.String:
-		as := av.String()
-		if bv.Kind() == reflect.String && op == '+' {
-			bs := bv.String()
-			return as + bs, nil
-		}
-		return nil, errors.New("Can't apply the operator to the values")
-	default:
-		return nil, errors.New("Can't apply the operator to the values")
-	}
-
-	switch op {
-	case '+':
-		if ai != 0 || bi != 0 {
-			return ai + bi, nil
-		} else if af != 0 || bf != 0 {
-			return af + bf, nil
-		} else if au != 0 || bu != 0 {
-			return au + bu, nil
-		}
-		return 0, nil
-	case '-':
-		if ai != 0 || bi != 0 {
-			return ai - bi, nil
-		} else if af != 0 || bf != 0 {
-			return af - bf, nil
-		} else if au != 0 || bu != 0 {
-			return au - bu, nil
-		}
-		return 0, nil
-	case '*':
-		if ai != 0 || bi != 0 {
-			return ai * bi, nil
-		} else if af != 0 || bf != 0 {
-			return af * bf, nil
-		} else if au != 0 || bu != 0 {
-			return au * bu, nil
-		}
-		return 0, nil
-	case '/':
-		if bi != 0 {
-			return ai / bi, nil
-		} else if bf != 0 {
-			return af / bf, nil
-		} else if bu != 0 {
-			return au / bu, nil
-		}
-		return nil, errors.New("Can't divide the value by 0")
-	default:
-		return nil, errors.New("There is no such an operation")
-	}
 }
 
 // NormalizeHugoFlags facilitates transitions of Hugo command-line flags,

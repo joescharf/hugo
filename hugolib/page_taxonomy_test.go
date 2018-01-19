@@ -14,6 +14,7 @@
 package hugolib
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,7 @@ categories = "d"
 TOML Front Matter with tags and categories`
 
 func TestParseTaxonomies(t *testing.T) {
+	t.Parallel()
 	for _, test := range []string{pageTomlWithTaxonomies,
 		pageJSONWithTaxonomies,
 		pageYamlWithTaxonomiesA,
@@ -63,17 +65,18 @@ func TestParseTaxonomies(t *testing.T) {
 		pageYamlWithTaxonomiesC,
 	} {
 
-		p, _ := NewPage("page/with/taxonomy")
+		s := newTestSite(t)
+		p, _ := s.NewPage("page/with/taxonomy")
 		_, err := p.ReadFrom(strings.NewReader(test))
 		if err != nil {
 			t.Fatalf("Failed parsing %q: %s", test, err)
 		}
 
-		param := p.GetParam("tags")
+		param := p.getParamToLower("tags")
 
 		if params, ok := param.([]string); ok {
 			expected := []string{"a", "b", "c"}
-			if !compareStringSlice(params, expected) {
+			if !reflect.DeepEqual(params, expected) {
 				t.Errorf("Expected %s: got: %s", expected, params)
 			}
 		} else if params, ok := param.(string); ok {
@@ -83,25 +86,11 @@ func TestParseTaxonomies(t *testing.T) {
 			}
 		}
 
-		param = p.GetParam("categories")
+		param = p.getParamToLower("categories")
 		singleparam := param.(string)
 
 		if singleparam != "d" {
 			t.Fatalf("Expected: d, got: %s", singleparam)
 		}
 	}
-}
-
-func compareStringSlice(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	for i, v := range a {
-		if b[i] != v {
-			return false
-		}
-	}
-
-	return true
 }

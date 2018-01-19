@@ -23,12 +23,17 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/spf13/hugo/hugofs"
-
 	"github.com/spf13/afero"
-	"github.com/spf13/viper"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
+)
+
+var (
+	// ErrThemeUndefined is returned when a theme has not be defined by the user.
+	ErrThemeUndefined = errors.New("no theme set")
+
+	// ErrWalkRootTooShort is returned when the root specified for a file walk is shorter than 4 characters.
+	ErrWalkRootTooShort = errors.New("Path too short. Stop walking.")
 )
 
 // filepathPathBridge is a bridge for common functionality in filepath vs path
@@ -117,7 +122,7 @@ func (p *PathSpec) UnicodeSanitize(s string) string {
 	for i, r := range source {
 		if r == '%' && i+2 < len(source) && ishex(source[i+1]) && ishex(source[i+2]) {
 			target = append(target, r)
-		} else if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '.' || r == '/' || r == '\\' || r == '_' || r == '-' || r == '#' || r == '+' {
+		} else if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '.' || r == '/' || r == '\\' || r == '_' || r == '-' || r == '#' || r == '+' || r == '~' {
 			target = append(target, r)
 		}
 	}
@@ -148,56 +153,64 @@ func ReplaceExtension(path string, newExt string) string {
 
 // AbsPathify creates an absolute path if given a relative path. If already
 // absolute, the path is just cleaned.
-func AbsPathify(inPath string) string {
+func (p *PathSpec) AbsPathify(inPath string) string {
 	if filepath.IsAbs(inPath) {
 		return filepath.Clean(inPath)
 	}
 
-	// TODO(bep): Consider moving workingDir to argument list
-	return filepath.Clean(filepath.Join(viper.GetString("workingDir"), inPath))
+	return filepath.Join(p.workingDir, inPath)
 }
 
-// GetStaticDirPath returns the absolute path to the static file dir
+// GetLayoutDirPath returns the absolute path to the layout file dir
 // for the current Hugo project.
-func GetStaticDirPath() string {
-	return AbsPathify(viper.GetString("staticDir"))
+func (p *PathSpec) GetLayoutDirPath() string {
+	return p.AbsPathify(p.layoutDir)
 }
 
 // GetThemeDir gets the root directory of the current theme, if there is one.
 // If there is no theme, returns the empty string.
-func GetThemeDir() string {
-	if ThemeSet() {
-		return AbsPathify(filepath.Join(viper.GetString("themesDir"), viper.GetString("theme")))
+func (p *PathSpec) GetThemeDir() string {
+	if p.ThemeSet() {
+		return p.AbsPathify(filepath.Join(p.themesDir, p.theme))
+	}
+	return ""
+}
+
+// GetRelativeThemeDir gets the relative root directory of the current theme, if there is one.
+// If there is no theme, returns the empty string.
+func (p *PathSpec) GetRelativeThemeDir() string {
+	if p.ThemeSet() {
+		return strings.TrimPrefix(filepath.Join(p.themesDir, p.theme), FilePathSeparator)
 	}
 	return ""
 }
 
 // GetThemeStaticDirPath returns the theme's static dir path if theme is set.
 // If theme is set and the static dir doesn't exist, an error is returned.
-func GetThemeStaticDirPath() (string, error) {
-	return getThemeDirPath("static")
+func (p *PathSpec) GetThemeStaticDirPath() (string, error) {
+	return p.getThemeDirPath("static")
 }
 
 // GetThemeDataDirPath returns the theme's data dir path if theme is set.
 // If theme is set and the data dir doesn't exist, an error is returned.
-func GetThemeDataDirPath() (string, error) {
-	return getThemeDirPath("data")
+func (p *PathSpec) GetThemeDataDirPath() (string, error) {
+	return p.getThemeDirPath("data")
 }
 
 // GetThemeI18nDirPath returns the theme's i18n dir path if theme is set.
 // If theme is set and the i18n dir doesn't exist, an error is returned.
-func GetThemeI18nDirPath() (string, error) {
-	return getThemeDirPath("i18n")
+func (p *PathSpec) GetThemeI18nDirPath() (string, error) {
+	return p.getThemeDirPath("i18n")
 }
 
-func getThemeDirPath(path string) (string, error) {
-	if !ThemeSet() {
-		return "", errors.New("No theme set")
+func (p *PathSpec) getThemeDirPath(path string) (string, error) {
+	if !p.ThemeSet() {
+		return "", ErrThemeUndefined
 	}
 
-	themeDir := filepath.Join(GetThemeDir(), path)
-	if _, err := hugofs.Source().Stat(themeDir); os.IsNotExist(err) {
-		return "", fmt.Errorf("Unable to find %s directory for theme %s in %s", path, viper.GetString("theme"), themeDir)
+	themeDir := filepath.Join(p.GetThemeDir(), path)
+	if _, err := p.Fs.Source.Stat(themeDir); os.IsNotExist(err) {
+		return "", fmt.Errorf("Unable to find %s directory for theme %s in %s", path, p.theme, themeDir)
 	}
 
 	return themeDir, nil
@@ -206,19 +219,9 @@ func getThemeDirPath(path string) (string, error) {
 // GetThemesDirPath gets the static files directory of the current theme, if there is one.
 // Ignores underlying errors.
 // TODO(bep) Candidate for deprecation?
-func GetThemesDirPath() string {
-	dir, _ := getThemeDirPath("static")
+func (p *PathSpec) GetThemesDirPath() string {
+	dir, _ := p.getThemeDirPath("static")
 	return dir
-}
-
-// MakeStaticPathRelative makes a relative path to the static files directory.
-// It does so by taking either the project's static path or the theme's static
-// path into consideration.
-func MakeStaticPathRelative(inPath string) (string, error) {
-	staticDir := GetStaticDirPath()
-	themeStaticDir := GetThemesDirPath()
-
-	return makePathRelative(inPath, staticDir, themeStaticDir)
 }
 
 func makePathRelative(inPath string, possibleDirectories ...string) (string, error) {
@@ -266,6 +269,18 @@ func GetDottedRelativePath(inPath string) string {
 	}
 
 	return dottedPath
+}
+
+// Ext takes a path and returns the extension, including the delmiter, i.e. ".md".
+func Ext(in string) string {
+	_, ext := fileAndExt(in, fpb)
+	return ext
+}
+
+// FileAndExt takes a path and returns the file and extension separated,
+// the extension including the delmiter, i.e. ".md".
+func FileAndExt(in string) (string, string) {
+	return fileAndExt(in, fpb)
 }
 
 // Filename takes a path, strips out the extension,
@@ -339,57 +354,6 @@ func GetRelativePath(path, base string) (final string, err error) {
 	return name, nil
 }
 
-// PaginateAliasPath creates a path used to access the aliases in the paginator.
-func PaginateAliasPath(base string, page int) string {
-	paginatePath := Config().GetString("paginatePath")
-	uglify := viper.GetBool("uglyURLs")
-	var p string
-	if base != "" {
-		p = filepath.FromSlash(fmt.Sprintf("/%s/%s/%d", base, paginatePath, page))
-	} else {
-		p = filepath.FromSlash(fmt.Sprintf("/%s/%d", paginatePath, page))
-	}
-	if uglify {
-		p += ".html"
-	}
-
-	return p
-}
-
-// GuessSection returns the section given a source path.
-// A section is the part between the root slash and the second slash
-// or before the first slash.
-func GuessSection(in string) string {
-	parts := strings.Split(in, FilePathSeparator)
-	// This will include an empty entry before and after paths with leading and trailing slashes
-	// eg... /sect/one/ -> ["", "sect", "one", ""]
-
-	// Needs to have at least a value and a slash
-	if len(parts) < 2 {
-		return ""
-	}
-
-	// If it doesn't have a leading slash and value and file or trailing slash, then return ""
-	if parts[0] == "" && len(parts) < 3 {
-		return ""
-	}
-
-	// strip leading slash
-	if parts[0] == "" {
-		parts = parts[1:]
-	}
-
-	// if first directory is "content", return second directory
-	if parts[0] == "content" {
-		if len(parts) > 2 {
-			return parts[1]
-		}
-		return ""
-	}
-
-	return parts[0]
-}
-
 // PathPrep prepares the path using the uglify setting to create paths on
 // either the form /section/name/index.html or /section/name.html.
 func PathPrep(ugly bool, in string) string {
@@ -413,7 +377,7 @@ func prettifyPath(in string, b filepathPathBridge) string {
 		if len(in) < 2 {
 			return b.Separator()
 		}
-		return b.Join(b.Clean(in), "index.html")
+		return b.Join(in, "index.html")
 	}
 	name, ext := fileAndExt(in, b)
 	if name == "index" {
@@ -470,11 +434,9 @@ func FindCWD() (string, error) {
 	return path, nil
 }
 
-var ErrWalkRootTooShort = errors.New("Path too short. Stop walking.")
-
 // SymbolicWalk is like filepath.Walk, but it supports the root being a
 // symbolic link. It will still not follow symbolic links deeper down in
-// the file structure
+// the file structure.
 func SymbolicWalk(fs afero.Fs, root string, walker filepath.WalkFunc) error {
 
 	// Sanity check
@@ -514,7 +476,7 @@ func SymbolicWalk(fs afero.Fs, root string, walker filepath.WalkFunc) error {
 }
 
 func getRealFileInfo(fs afero.Fs, path string) (os.FileInfo, string, error) {
-	fileInfo, err := lstatIfOs(fs, path)
+	fileInfo, err := LstatIfOs(fs, path)
 	realPath := path
 
 	if err != nil {
@@ -526,7 +488,7 @@ func getRealFileInfo(fs afero.Fs, path string) (os.FileInfo, string, error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("Cannot read symbolic link '%s', error was: %s", path, err)
 		}
-		fileInfo, err = lstatIfOs(fs, link)
+		fileInfo, err = LstatIfOs(fs, link)
 		if err != nil {
 			return nil, "", fmt.Errorf("Cannot stat '%s', error was: %s", link, err)
 		}
@@ -549,7 +511,7 @@ func GetRealPath(fs afero.Fs, path string) (string, error) {
 
 // Code copied from Afero's path.go
 // if the filesystem is OsFs use Lstat, else use fs.Stat
-func lstatIfOs(fs afero.Fs, path string) (info os.FileInfo, err error) {
+func LstatIfOs(fs afero.Fs, path string) (info os.FileInfo, err error) {
 	_, ok := fs.(*afero.OsFs)
 	if ok {
 		info, err = os.Lstat(path)

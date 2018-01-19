@@ -14,13 +14,14 @@
 package source
 
 import (
-	"github.com/spf13/viper"
+	"path/filepath"
 	"testing"
+
+	"github.com/gohugoio/hugo/hugofs"
+	"github.com/spf13/viper"
 )
 
 func TestIgnoreDotFilesAndDirectories(t *testing.T) {
-	viper.Reset()
-	defer viper.Reset()
 
 	tests := []struct {
 		path                string
@@ -41,18 +42,21 @@ func TestIgnoreDotFilesAndDirectories(t *testing.T) {
 		{"foobar/bar~foo.md", false, nil},
 		{"foobar/foo.md", true, []string{"\\.md$", "\\.boo$"}},
 		{"foobar/foo.html", false, []string{"\\.md$", "\\.boo$"}},
-		{"foobar/foo.md", true, []string{"^foo"}},
-		{"foobar/foo.md", false, []string{"*", "\\.md$", "\\.boo$"}},
+		{"foobar/foo.md", true, []string{"foo.md$"}},
+		{"foobar/foo.md", true, []string{"*", "\\.md$", "\\.boo$"}},
 		{"foobar/.#content.md", true, []string{"/\\.#"}},
 		{".#foobar.md", true, []string{"^\\.#"}},
 	}
 
-	for _, test := range tests {
+	for i, test := range tests {
 
-		viper.Set("ignoreFiles", test.ignoreFilesRegexpes)
+		v := viper.New()
+		v.Set("ignoreFiles", test.ignoreFilesRegexpes)
 
-		if ignored := isNonProcessablePath(test.path); test.ignore != ignored {
-			t.Errorf("File not ignored.  Expected: %t, got: %t", test.ignore, ignored)
+		s := NewSourceSpec(v, hugofs.NewMem(v))
+
+		if ignored := s.IgnoreFile(filepath.FromSlash(test.path)); test.ignore != ignored {
+			t.Errorf("[%d] File not ignored", i)
 		}
 	}
 }
