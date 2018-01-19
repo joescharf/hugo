@@ -215,6 +215,8 @@ func AddCommands() {
 	genCmd.AddCommand(genautocompleteCmd)
 	genCmd.AddCommand(gendocCmd)
 	genCmd.AddCommand(genmanCmd)
+	genCmd.AddComxxxmand(genindexCmd)
+
 	genCmd.AddCommand(createGenDocsHelper().cmd)
 	genCmd.AddCommand(createGenChromaStyles().cmd)
 
