@@ -16,10 +16,12 @@ package commands
 import (
 	"encoding/json"
 	"github.com/algolia/algoliasearch-client-go/algoliasearch"
+
+	"github.com/gohugoio/hugo/hugolib"
+
+	"errors"
 	"github.com/spf13/cobra"
-	"github.com/spf13/hugo/hugolib"
 	jww "github.com/spf13/jwalterweatherman"
-	"github.com/spf13/viper"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"strings"
@@ -75,21 +77,38 @@ the root of the hugo site with the following values:
 		var entriesJson []byte
 		var algoliaCfg AlgoliaCfg
 
-		if err := InitializeConfig(); err != nil {
+		c, err := InitializeConfig(false, nil)
+		if err != nil {
 			return err
 		}
 
-		sites, err := hugolib.NewHugoSitesFromConfiguration()
+		// Get the static directories via c.PathSpec()
+		pspec := c.PathSpec()
+		staticDirs := pspec.StaticDirs()
+		staticDir := ""
+		if len(staticDirs) > 0 {
+			staticDir = staticDirs[0]
+		} else {
+			return errors.New("Error determining static directory")
+		}
+		jww.FEEDBACK.Printf("Static directory set to: %s \n", "./"+staticDir)
 
+		// this replaces NewHugoSitesFromConfiguration
+		h, err := hugolib.NewHugoSites(*c.DepsCfg)
 		if err != nil {
-			return newSystemError("Error creating sites", err)
+			return err
 		}
 
-		if err := sites.Build(hugolib.BuildCfg{SkipRender: true}); err != nil {
-			return newSystemError("Error Processing Source Content", err)
+		// This does the build, skipping the render
+		if err := h.Build(hugolib.BuildCfg{SkipRender: true}); err != nil {
+			return err
 		}
 
-		for _, p := range sites.Pages() {
+		site := h.Sites[0]
+
+		site.Log.FEEDBACK.Println("processing", len(site.AllPages), "content files")
+
+		for _, p := range site.Pages {
 			if p.IsPage() {
 				entries = append(entries, processPage(p))
 			}
@@ -98,7 +117,7 @@ the root of the hugo site with the following values:
 		jww.FEEDBACK.Printf("\nGenerated %d Index Entries\n", len(entries))
 
 		if genindexjson {
-			outFile := viper.GetString("staticDir") + "/" + genindexfile
+			outFile := "./" + staticDir + "/" + genindexfile
 			if entriesJson, err = json.Marshal(entries); err != nil {
 				return newSystemError("Error converting index entries to JSON", err)
 			}
@@ -138,10 +157,10 @@ func processPage(page *hugolib.Page) map[string]interface{} {
 		"tags":    page.GetParam("tags"),
 	}
 
-	jww.FEEDBACK.Printf("\nPage: %s - %d Words\n", entry["title"], page.WordCount())
-	jww.FEEDBACK.Println("URL: ", entry["url"])
+	jww.FEEDBACK.Printf("\n--> Page: %s - %d Words\n", entry["title"], page.WordCount())
+	jww.FEEDBACK.Println("--> URL: ", entry["url"])
 	if entry["tags"] != nil {
-		jww.FEEDBACK.Printf("Tags: [%s]\n", strings.Join(entry["tags"].([]string), ", "))
+		jww.FEEDBACK.Printf("--> Tags: [%s]\n", strings.Join(entry["tags"].([]string), ", "))
 	}
 	return entry
 }
